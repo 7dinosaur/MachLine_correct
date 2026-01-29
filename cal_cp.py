@@ -23,6 +23,7 @@ class Element:
         self.normal_x: float = normal_x
         self.normal_y: float = normal_y
         self.normal_z: float = normal_z
+        self.normals: list[float] = [self.normal_x, self.normal_y, self.normal_z]
 
         self.cell_data: dict[str, float] = cell_data
         self.point_data: dict[str, list] = point_data
@@ -73,6 +74,9 @@ class Block:
         return [e for e in self.elements if e.get_cell_data(key) == value]
     
     def write_dat(self) -> None:
+        var_list = ["X", "Y", "Z"] + list(self.elements[0].point_data.keys())\
+                 + ["normal_x", "normal_y", "normal_z"] + list(self.elements[0].cell_data.keys())
+        N_data_end = 3 + len(list(self.elements[0].point_data.keys()))
         points_count = 1
         for e in self.elements:
             polygen = [0, 0, 0]
@@ -88,26 +92,38 @@ class Block:
                     polygen[v_idx] = self.points[p_tmp][0]
                     points_count += 1
             e.add_point_data("polygen", polygen)
-        
         with open("test.dat", "w") as f:
-            title1 = "TITLE = \"Panel Data\"\n"+"VARIABLES = \"X\", \"Y\", \"Z\"\n"
+            title1 = "TITLE = \"Panel Data\"\n"+"VARIABLES = "
+            var_head = " ".join([f"\"{v}\"" for v in var_list]) + "\n"
             title2 = f"ZONE T=\"Triangle Mesh\", N={points_count-1}, E={len(self.elements)}, DATAPACKING=BLOCK, ZONETYPE=FETRIANGLE\n"
-            title3 = f"VARLOCATION=([1-3]=NODAL)\n"
-            f.writelines([title1, title2, title3])
+            title3 = f"VARLOCATION=([1-{N_data_end}]=NODAL, [{N_data_end+1}-{len(var_list)}]=CELLCENTERED)\n"
+            f.writelines([title1, var_head, title2, title3])
             points_lines = []
             cells_lines = []
             polygen_lines = []
             ##先写节点数据
             keys_list = list(self.points.keys())
             points = np.array([[float(v[0])*1e-6, float(v[1])*1e-6, float(v[2])*1e-6] for v in keys_list], dtype=float).T.flatten()
+            other_data = np.array([b[1:] for b in self.points.values()], dtype=float).T.flatten()
+            points = np.stack([points, other_data]).flatten()
             for i in range(0, len(points), 5):
                 chunk = points[i:i+5]
                 points_lines.append(" ".join(f"{v:.6f}" for v in chunk) + "\n")
             f.write(''.join(points_lines))
+            print(other_data.shape)
             ##再写单元数据
             ##最后写索引
+            normal_vec = []
+            cells_data = []
             for e in self.elements:
                 polygen_lines.append(" ".join(f"{p}" for p in e.get_point_data("polygen")) + "\n")
+                normal_vec.append(e.normals)
+                cells_data.append([c for c in e.cell_data.values()])
+            normal_vec = np.array(normal_vec).T.flatten()
+            cells_data = np.append(normal_vec, np.array(cells_data).T.flatten())
+            for data in cells_data:
+                cells_lines.append(f"{data}" + "\n")
+            f.write(''.join(cells_lines))
             f.write(''.join(polygen_lines))
 
 def read_block(vtk_file: str) -> Block:
