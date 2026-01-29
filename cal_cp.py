@@ -56,7 +56,7 @@ class Element:
 class Block:
     def __init__(self) -> None:
         self.elements : list[Element] = []
-        self.points : dict[tuple[float, float, float], int] = {}
+        self.points : dict[tuple[float, float, float], list] = {}
 
     def add_element(self, element: Element) -> None:
         """添加单个面元"""
@@ -73,16 +73,19 @@ class Block:
         return [e for e in self.elements if e.get_cell_data(key) == value]
     
     def write_dat(self) -> None:
-        points_count = max(self.points.values(), default=0) + 1
+        points_count = 1
         for e in self.elements:
             polygen = [0, 0, 0]
             for v_idx, ver in enumerate(e.vertices):
                 p_tmp = (int(round(ver[0]*1e6)), int(round(ver[1]*1e6)), int(round(ver[2]*1e6)))
                 if p_tmp in self.points:
-                    polygen[v_idx] = self.points[p_tmp]
+                    polygen[v_idx] = self.points[p_tmp][0]
                 else:
-                    self.points[p_tmp] = points_count
-                    polygen[v_idx] = self.points[p_tmp]
+                    self.points[p_tmp] = [points_count]
+                    point_data = e.point_data
+                    for item in point_data.values():
+                        self.points[p_tmp].append(item[v_idx])
+                    polygen[v_idx] = self.points[p_tmp][0]
                     points_count += 1
             e.add_point_data("polygen", polygen)
         
@@ -101,11 +104,11 @@ class Block:
                 chunk = points[i:i+5]
                 points_lines.append(" ".join(f"{v:.6f}" for v in chunk) + "\n")
             f.write(''.join(points_lines))
+            ##再写单元数据
+            ##最后写索引
             for e in self.elements:
                 polygen_lines.append(" ".join(f"{p}" for p in e.get_point_data("polygen")) + "\n")
             f.write(''.join(polygen_lines))
-            ##再写单元数据
-            ##最后写索引
 
 def read_block(vtk_file: str) -> Block:
     ##读取vtk数据
