@@ -35,24 +35,28 @@ class Element:
     def add_cell_data(self, key: str, value: float) -> None:
         self.cell_data[key] = value
 
-    def add_point_data(self, key: str, value: list[float]) -> None:
+    def add_point_data(self, key: str, value: list) -> None:
         self.point_data[key] = value
 
     def get_cell_data(self, key: str) -> Any:
         return self.cell_data.get(key)
+    
+    def get_point_data(self, key: str) -> Any:
+        return self.point_data.get(key)
 
     def __repr__(self) -> str:
         area = self.area
         return (
             f"Element(area={area:.6f}, "
             f"normal=({self.normal_x:.4f}, {self.normal_y:.4f}, {self.normal_z:.4f}), "
-            f"cell_data={list(self.cell_data.keys())})"
+            f"cell_data={list(self.cell_data.keys())}), "
+            f"point_data={list(self.point_data.keys())})"
         )
     
 class Block:
     def __init__(self) -> None:
         self.elements : list[Element] = []
-        self.points : list[Element] = []
+        self.points : dict[tuple[float, float, float], int] = {}
 
     def add_element(self, element: Element) -> None:
         """添加单个面元"""
@@ -69,7 +73,39 @@ class Block:
         return [e for e in self.elements if e.get_cell_data(key) == value]
     
     def write_dat(self) -> None:
-        pass
+        points_count = max(self.points.values(), default=0) + 1
+        for e in self.elements:
+            polygen = [0, 0, 0]
+            for v_idx, ver in enumerate(e.vertices):
+                p_tmp = (int(round(ver[0]*1e6)), int(round(ver[1]*1e6)), int(round(ver[2]*1e6)))
+                if p_tmp in self.points:
+                    polygen[v_idx] = self.points[p_tmp]
+                else:
+                    self.points[p_tmp] = points_count
+                    polygen[v_idx] = self.points[p_tmp]
+                    points_count += 1
+            e.add_point_data("polygen", polygen)
+        
+        with open("test.dat", "w") as f:
+            title1 = "TITLE = \"Panel Data\"\n"+"VARIABLES = \"X\", \"Y\", \"Z\"\n"
+            title2 = f"ZONE T=\"Triangle Mesh\", N={points_count-1}, E={len(self.elements)}, DATAPACKING=BLOCK, ZONETYPE=FETRIANGLE\n"
+            title3 = f"VARLOCATION=([1-3]=NODAL)\n"
+            f.writelines([title1, title2, title3])
+            points_lines = []
+            cells_lines = []
+            polygen_lines = []
+            ##先写节点数据
+            keys_list = list(self.points.keys())
+            points = np.array([[float(v[0])*1e-6, float(v[1])*1e-6, float(v[2])*1e-6] for v in keys_list], dtype=float).T.flatten()
+            for i in range(0, len(points), 5):
+                chunk = points[i:i+5]
+                points_lines.append(" ".join(f"{v:.6f}" for v in chunk) + "\n")
+            f.write(''.join(points_lines))
+            for e in self.elements:
+                polygen_lines.append(" ".join(f"{p}" for p in e.get_point_data("polygen")) + "\n")
+            f.write(''.join(polygen_lines))
+            ##再写单元数据
+            ##最后写索引
 
 def read_block(vtk_file: str) -> Block:
     ##读取vtk数据
@@ -256,12 +292,14 @@ def read_csv():
 
 def main() -> None:
     aircraft = read_block("7105_notail.vtk")
-    read_csv()
-    lift = cal_cp(aircraft)
-    observe_points = gene_observe(72.0, 2.0)
-    V = cal_V(aircraft, observe_points)
-    plt.plot(observe_points[:, 0], V[:, 0])
-    print(V)
+    aircraft.write_dat()
+    print(aircraft.elements[0].get_point_data("polygen"))
+    # read_csv()
+    # lift = cal_cp(aircraft)
+    # observe_points = gene_observe(72.0, 2.0)
+    # V = cal_V(aircraft, observe_points)
+    # plt.plot(observe_points[:, 0], V[:, 0])
+    # print(V)
 
 if __name__ == "__main__":
     main()
