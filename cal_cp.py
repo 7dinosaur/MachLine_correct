@@ -110,11 +110,11 @@ class Block:
                 chunk = points[i:i+5]
                 points_lines.append(" ".join(f"{v:.6f}" for v in chunk) + "\n")
             f.write(''.join(points_lines))
-            print(other_data.shape)
             ##再写单元数据
             ##最后写索引
             normal_vec = []
             cells_data = []
+
             for e in self.elements:
                 polygen_lines.append(" ".join(f"{p}" for p in e.get_point_data("polygen")) + "\n")
                 normal_vec.append(e.normals)
@@ -125,6 +125,20 @@ class Block:
                 cells_lines.append(f"{data}" + "\n")
             f.write(''.join(cells_lines))
             f.write(''.join(polygen_lines))
+
+    def cal_v_vert(self) -> None:
+        v_free = np.array([1., 0., 0.], dtype=float)
+        for e in self.elements[:1]:
+            #读取三个节点坐标与mu强度
+            ver = e.vertices
+            normal = np.array(e.normals, dtype=float)
+            mu = e.get_point_data("mu")
+            #计算面元局部坐标
+            v0 = np.cross(normal, v_free); v0 = v0/np.linalg.norm(v0)
+            u0 = np.cross(v0, normal); u0 = u0/np.linalg.norm(u0)
+            print(v0, u0)
+            S_mu = np.ones([3, 3])
+
 
 def read_block(vtk_file: str) -> Block:
     ##读取vtk数据
@@ -222,7 +236,7 @@ def cal_cp(aircraft: Block) -> float:
         if False:
             Lift += 0
         else:
-            Cp = e.get_cell_data("C_p_ise")
+            Cp = e.get_cell_data("C_p_2nd")
             Si = e.area
             nz = e.normal_z
             dL = -Cp * Si * nz / Sref
@@ -312,9 +326,9 @@ def read_csv():
 def main() -> None:
     aircraft = read_block("7105_notail.vtk")
     aircraft.write_dat()
-    print(aircraft.elements[0].get_point_data("polygen"))
     # read_csv()
-    # lift = cal_cp(aircraft)
+    print(cal_cp(aircraft))
+    aircraft.cal_v_vert()
     # observe_points = gene_observe(72.0, 2.0)
     # V = cal_V(aircraft, observe_points)
     # plt.plot(observe_points[:, 0], V[:, 0])
