@@ -128,16 +128,110 @@ class Block:
 
     def cal_v_vert(self) -> None:
         v_free = np.array([1., 0., 0.], dtype=float)
+        Ma = 2.0; B = np.sqrt(Ma**2 - 1)
+        C_hat_g = v_free/np.linalg.norm(v_free)
+        C_mat_g = (1 - Ma**2)*np.eye(3) + Ma**2*np.outer(C_hat_g, C_hat_g)
         for e in self.elements[:1]:
             #读取三个节点坐标与mu强度
             ver = e.vertices
             normal = np.array(e.normals, dtype=float)
-            mu = e.get_point_data("mu")
+            mu = np.array(e.get_point_data("mu"), dtype=float)
             #计算面元局部坐标
             v0 = np.cross(normal, v_free); v0 = v0/np.linalg.norm(v0)
             u0 = np.cross(v0, normal); u0 = u0/np.linalg.norm(u0)
-            print(v0, u0)
-            S_mu = np.ones([3, 3])
+            B_mat = np.zeros([3, 3]); B_mat[0,0] = 1 - Ma**2; B_mat[1, 1] = 1; B_mat[2, 2] = 1
+            vg = B_mat @ normal
+            x = normal @ vg
+            assert(x > 0), "!!! Panel is superinclined, which is not allowed."
+            y = 1.0/np.sqrt(abs(x))
+            rs = -1 * x/abs(x)
+            A_g_ls = np.zeros([3, 3])
+            A_g_ls[0, :] = y*np.dot(C_mat_g, u0)
+            A_g_ls[1, :] = rs/B*np.dot(C_mat_g, v0)
+            A_g_ls[2, :] = B*y*normal
+            A_ls_g = np.linalg.inv(A_g_ls)
+            centroid = (ver[0] + ver[1] + ver[2])/3
+            P_rel = (ver - centroid).T
+            P_ls = A_g_ls[:2] @ P_rel
+            S_mu = np.ones([3, 3]); S_mu[:, 1:] = P_ls.T
+            T_mu = np.linalg.inv(S_mu)
+            mu_param = T_mu @ mu
+            dv = np.array([mu_param[1], mu_param[2], 0], dtype=float)
+            dv = A_g_ls.T @ dv
+            print(dv)
+
+    import numpy as np
+
+def test_pipeline():
+    # freestream and Mach
+    v_free = np.array([1., 0., 0.])
+    Ma = 2.0
+    B = np.sqrt(Ma**2 - 1.)
+    C_hat_g = v_free / np.linalg.norm(v_free)
+    C_mat_g = (1 - Ma**2) * np.eye(3) + Ma**2 * np.outer(C_hat_g, C_hat_g)
+    B_mat = np.eye(3) - Ma**2 * np.outer(C_hat_g, C_hat_g)
+
+    # simple triangle in z=0 plane
+    verts = np.array([[0.,0.,0.],
+                      [1.,0.,0.],
+                      [0.,1.,0.]])  # shape (3,3) rows = vertices
+    normal = np.array([0.,0.,1.])  # upward
+
+    # construct local basis u0,v0
+    v0 = np.cross(normal, v_free)
+    v0 = v0 / np.linalg.norm(v0)
+    u0 = np.cross(v0, normal)
+    u0 = u0 / np.linalg.norm(u0)
+
+    # compute x = n^T * (B_mat * n)
+    nu_g = B_mat @ normal
+    x = normal @ nu_g
+    assert x > 0, "superinclined"
+
+    y = 1.0 / np.sqrt(abs(x))
+    s = -1.0  # supersonic s = -1
+    r = np.sign(x)  # usually +1
+    rs = r * s
+
+    # build transform A_g_to_ls (rows are basis vectors)
+    A_g_ls = np.zeros((3,3))
+    A_g_ls[0,:] = y * (C_mat_g @ u0)
+    A_g_ls[1,:] = (rs / B) * (C_mat_g @ v0)
+    A_g_ls[2,:] = B * y * normal
+
+    # check determinant ~ B^2
+    detA = np.linalg.det(A_g_ls)
+    print("det(A_g_ls) =", detA, " expected B^2 =", B**2)
+
+    A_ls_g = np.linalg.inv(A_g_ls)
+
+    # centroid and relative positions: produce P_rel as (3, N) with columns vertices
+    centroid = np.mean(verts, axis=0)
+    P_rel = (verts - centroid).T  # shape (3,3)
+
+    # PROJECT vertices to local coords using A_g_ls first two rows
+    P_ls = A_g_ls[:2, :] @ P_rel   # shape (2,3)
+    print("P_ls (2x3):\n", P_ls)
+
+    # define a known linear mu distribution in local coords: mu = mu0 + mu1 x + mu2 y
+    mu_true_params = np.array([1.0, 2.0, 3.0])  # [mu0, mu1, mu2]
+    # compute mu at vertices using local coordinates
+    mu_verts = mu_true_params[0] + mu_true_params[1]*P_ls[0,:] + mu_true_params[2]*P_ls[1,:]
+    print("mu_verts:", mu_verts)
+
+    # Now run the same inversion you used
+    S_mu = np.ones((3,3))
+    S_mu[:,1:] = P_ls.T   # rows correspond to vertices
+    T_mu = np.linalg.inv(S_mu)
+    mu_params_recov = T_mu @ mu_verts
+    print("recovered mu_params:", mu_params_recov, " expected:", mu_true_params)
+
+    # local dv and transform to global
+    dv_local = np.array([0., mu_params_recov[1], mu_params_recov[2]])  # local vector [v_xlocal, v_ylocal, v_zlocal]
+    # Note ordering: earlier we used dv = [mu1, mu2, 0], placed as [v_x, v_y, v_z]
+    dv_local = np.array([mu_params_recov[1], mu_params_recov[2], 0.])
+    dv_global = A_ls_g @ dv_local
+    print("dv_local:", dv_local, " dv_global:", dv_global, " norm global:", np.linalg.norm(dv_global))
 
 
 def read_block(vtk_file: str) -> Block:
@@ -329,6 +423,7 @@ def main() -> None:
     # read_csv()
     print(cal_cp(aircraft))
     aircraft.cal_v_vert()
+    test_pipeline()
     # observe_points = gene_observe(72.0, 2.0)
     # V = cal_V(aircraft, observe_points)
     # plt.plot(observe_points[:, 0], V[:, 0])
