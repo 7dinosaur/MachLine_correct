@@ -1,9 +1,13 @@
+from dis import disco
+from socket import AI_CANONNAME
+
 import numpy as np
 from numpy.typing import NDArray
 from matplotlib import pyplot as plt
 import pandas as pd
 import os
 from typing import Any
+import copy
     
 class Element:
     def __init__(
@@ -11,19 +15,12 @@ class Element:
         vertex1: NDArray | list[float],
         vertex2: NDArray | list[float],
         vertex3: NDArray | list[float],
-        normal_x: float,
-        normal_y: float,
-        normal_z: float,
         cell_data: dict[str, float],
         point_data: dict) -> None:
         self.vertex1 = np.array(vertex1)
         self.vertex2 = np.array(vertex2)
         self.vertex3 = np.array(vertex3)
         self.vertices: list[NDArray] = [self.vertex1, self.vertex2, self.vertex3]
-        self.normal_x: float = normal_x
-        self.normal_y: float = normal_y
-        self.normal_z: float = normal_z
-        self.normals: list[float] = [self.normal_x, self.normal_y, self.normal_z]
 
         self.cell_data: dict[str, float] = cell_data
         self.point_data: dict[str, list] = point_data
@@ -43,13 +40,12 @@ class Element:
         return self.cell_data.get(key)
     
     def get_point_data(self, key: str) -> Any:
-        return self.point_data.get(key)
+        return np.array(self.point_data.get(key))
 
     def __repr__(self) -> str:
         area = self.area
         return (
             f"Element(area={area:.6f}, "
-            f"normal=({self.normal_x:.4f}, {self.normal_y:.4f}, {self.normal_z:.4f}), "
             f"cell_data={list(self.cell_data.keys())}), "
             f"point_data={list(self.point_data.keys())})"
         )
@@ -57,6 +53,7 @@ class Element:
 class Block:
     def __init__(self) -> None:
         self.elements : list[Element] = []
+        self.tail_elements : list[Element] = []
         self.points : dict[tuple[float, float, float], list] = {}
 
     def add_element(self, element: Element) -> None:
@@ -73,9 +70,54 @@ class Block:
     def get_element_by_value(self, key: str, value: float) -> list[Element]:
         return [e for e in self.elements if e.get_cell_data(key) == value]
     
+    def read_wake(self, wake_vtk_file: str):
+        wake_block = read_block(wake_vtk_file)
+        wake_vertex_dict = {}
+        for ew in wake_block.elements:
+            v_wake1, v_wake2, v_wake3 = ew.vertices
+            mu1, mu2, mu3 = ew.get_point_data("mu")  # 三个顶点的mu
+
+            # 逐个顶点加入字典（自动去重）
+            p1 = tuple(v_wake1.round(9))  # 转元组才能做key，浮点精度9位足够
+            p2 = tuple(v_wake2.round(9))
+            p3 = tuple(v_wake3.round(9))
+
+            wake_vertex_dict[p1] = mu1
+            wake_vertex_dict[p2] = mu2
+            wake_vertex_dict[p3] = mu3
+
+        # 🔥 最终输出：无重复节点列表 + 对应mu列表
+        wake_ver = np.array([np.array(p) for p in wake_vertex_dict.keys()])  # 节点列表
+        wake_mu = list(wake_vertex_dict.values())                  # 对应mu列表
+        print(wake_ver.shape)
+
+        count = 0
+        for e in self.elements:
+            e.add_cell_data("is_tail", 0)
+            discon = 0
+            v1, v2, v3 = e.vertices
+            v1 = np.array(v1).reshape(1, 3); v2 = np.array(v2).reshape(1, 3); v3 = np.array(v3).reshape(1, 3)
+            new_mu = e.get_point_data("mu").copy()
+            for i in range(3):
+                v = locals()[f"v{i+1}"]
+                ver_diff = wake_ver - v
+                ver_diff = np.linalg.norm(ver_diff, axis=1)
+                for j,d in enumerate(ver_diff):
+                    if d < 1e-5:
+                        discon += 1
+                        count += 1
+                        continue
+            if discon > 0:
+                self.tail_elements.append(e)
+
+            e.add_cell_data("discon", discon)
+            e.add_point_data("mu2", new_mu)
+
+        print(count)
+    
     def write_dat(self) -> None:
         var_list = ["X", "Y", "Z"] + list(self.elements[0].point_data.keys())\
-                 + ["normal_x", "normal_y", "normal_z"] + list(self.elements[0].cell_data.keys())
+                     + list(self.elements[0].cell_data.keys())
         N_data_end = 3 + len(list(self.elements[0].point_data.keys()))
         points_count = 1
         for e in self.elements:
@@ -105,37 +147,41 @@ class Block:
             keys_list = list(self.points.keys())
             points = np.array([[float(v[0])*1e-6, float(v[1])*1e-6, float(v[2])*1e-6] for v in keys_list], dtype=float).T.flatten()
             other_data = np.array([b[1:] for b in self.points.values()], dtype=float).T.flatten()
-            points = np.stack([points, other_data]).flatten()
+            points = np.concatenate([points, other_data]).flatten()
             for i in range(0, len(points), 5):
                 chunk = points[i:i+5]
                 points_lines.append(" ".join(f"{v:.6f}" for v in chunk) + "\n")
             f.write(''.join(points_lines))
             ##再写单元数据
             ##最后写索引
-            normal_vec = []
             cells_data = []
 
             for e in self.elements:
                 polygen_lines.append(" ".join(f"{p}" for p in e.get_point_data("polygen")) + "\n")
-                normal_vec.append(e.normals)
                 cells_data.append([c for c in e.cell_data.values()])
-            normal_vec = np.array(normal_vec).T.flatten()
-            cells_data = np.append(normal_vec, np.array(cells_data).T.flatten())
+            cells_data = np.array(cells_data).T.flatten()
             for data in cells_data:
                 cells_lines.append(f"{data}" + "\n")
             f.write(''.join(cells_lines))
             f.write(''.join(polygen_lines))
 
+        print("写出数据, 路径为test.dat")
+
     def cal_v_vert(self) -> None:
         v_free = np.array([1., 0., 0.], dtype=float)
-        Ma = 2.0; B = np.sqrt(Ma**2 - 1)
+        Ma = 1.6; B = np.sqrt(Ma**2 - 1)
         C_hat_g = v_free/np.linalg.norm(v_free)
         C_mat_g = (1 - Ma**2)*np.eye(3) + Ma**2*np.outer(C_hat_g, C_hat_g)
-        for e in self.elements[:1]:
+        print(C_mat_g)
+        for e in self.elements:
             #读取三个节点坐标与mu强度
+            if e.get_cell_data("discon") > 0:
+                continue
             ver = e.vertices
-            normal = np.array(e.normals, dtype=float)
-            mu = np.array(e.get_point_data("mu"), dtype=float)
+            normal_name = ["normals_x", "normals_y", "normals_z"]
+            n1, n2, n3 = [e.get_cell_data(n) for n in normal_name]
+            normal = np.array([n1, n2, n3], dtype=float)
+            mu = np.array(e.get_point_data("mu2"), dtype=float)
             #计算面元局部坐标
             v0 = np.cross(normal, v_free); v0 = v0/np.linalg.norm(v0)
             u0 = np.cross(v0, normal); u0 = u0/np.linalg.norm(u0)
@@ -149,7 +195,7 @@ class Block:
             A_g_ls[0, :] = y*np.dot(C_mat_g, u0)
             A_g_ls[1, :] = rs/B*np.dot(C_mat_g, v0)
             A_g_ls[2, :] = B*y*normal
-            A_ls_g = np.linalg.inv(A_g_ls)
+            # A_ls_g = np.linalg.inv(A_g_ls)
             centroid = (ver[0] + ver[1] + ver[2])/3
             P_rel = (ver - centroid).T
             P_ls = A_g_ls[:2] @ P_rel
@@ -158,89 +204,51 @@ class Block:
             mu_param = T_mu @ mu
             dv = np.array([mu_param[1], mu_param[2], 0], dtype=float)
             dv = A_g_ls.T @ dv
-            print(dv)
 
-    import numpy as np
+            e.add_cell_data("dv_cx", dv[0])
+            e.add_cell_data("dv_cy", dv[1])
+            e.add_cell_data("dv_cz", dv[2])
 
-def test_pipeline():
-    # freestream and Mach
-    v_free = np.array([1., 0., 0.])
-    Ma = 2.0
-    B = np.sqrt(Ma**2 - 1.)
-    C_hat_g = v_free / np.linalg.norm(v_free)
-    C_mat_g = (1 - Ma**2) * np.eye(3) + Ma**2 * np.outer(C_hat_g, C_hat_g)
-    B_mat = np.eye(3) - Ma**2 * np.outer(C_hat_g, C_hat_g)
+        print("正在为尾缘面板赋值最近邻 dv...")
+        # 先收集所有 非尾缘 面板的质心 + dv
+        non_tail_centers = []
+        non_tail_dvs = []
+        for e in self.elements:
+            if e.get_cell_data("discon") == 0:
+                c = (e.vertex1 + e.vertex2 + e.vertex3) / 3
+                dvx = e.get_cell_data("dv_cx")
+                dvy = e.get_cell_data("dv_cy")
+                dvz = e.get_cell_data("dv_cz")
+                non_tail_centers.append(c)
+                non_tail_dvs.append((dvx, dvy, dvz))
 
-    # simple triangle in z=0 plane
-    verts = np.array([[0.,0.,0.],
-                      [1.,0.,0.],
-                      [0.,1.,0.]])  # shape (3,3) rows = vertices
-    normal = np.array([0.,0.,1.])  # upward
+        non_tail_centers = np.array(non_tail_centers)
+        non_tail_dvs = np.array(non_tail_dvs)
 
-    # construct local basis u0,v0
-    v0 = np.cross(normal, v_free)
-    v0 = v0 / np.linalg.norm(v0)
-    u0 = np.cross(v0, normal)
-    u0 = u0 / np.linalg.norm(u0)
+        # 遍历尾缘面板，找最近非尾缘面板
+        for e in self.elements:
+            if e.get_cell_data("discon") == 0:
+                continue
 
-    # compute x = n^T * (B_mat * n)
-    nu_g = B_mat @ normal
-    x = normal @ nu_g
-    assert x > 0, "superinclined"
+            # 当前尾缘面板质心
+            c = (e.vertex1 + e.vertex2 + e.vertex3) / 3
+            # 最近邻搜索
+            dists = np.linalg.norm(non_tail_centers - c, axis=1)
+            idx = np.argmin(dists)
+            # 赋值
+            dvx, dvy, dvz = non_tail_dvs[idx]
+            e.add_cell_data("dv_cx", dvx)
+            e.add_cell_data("dv_cy", dvy)
+            e.add_cell_data("dv_cz", dvz)
 
-    y = 1.0 / np.sqrt(abs(x))
-    s = -1.0  # supersonic s = -1
-    r = np.sign(x)  # usually +1
-    rs = r * s
+        print("✅ 所有尾缘面板 dv 已赋值为最近邻非尾缘值！")
 
-    # build transform A_g_to_ls (rows are basis vectors)
-    A_g_ls = np.zeros((3,3))
-    A_g_ls[0,:] = y * (C_mat_g @ u0)
-    A_g_ls[1,:] = (rs / B) * (C_mat_g @ v0)
-    A_g_ls[2,:] = B * y * normal
-
-    # check determinant ~ B^2
-    detA = np.linalg.det(A_g_ls)
-    print("det(A_g_ls) =", detA, " expected B^2 =", B**2)
-
-    A_ls_g = np.linalg.inv(A_g_ls)
-
-    # centroid and relative positions: produce P_rel as (3, N) with columns vertices
-    centroid = np.mean(verts, axis=0)
-    P_rel = (verts - centroid).T  # shape (3,3)
-
-    # PROJECT vertices to local coords using A_g_ls first two rows
-    P_ls = A_g_ls[:2, :] @ P_rel   # shape (2,3)
-    print("P_ls (2x3):\n", P_ls)
-
-    # define a known linear mu distribution in local coords: mu = mu0 + mu1 x + mu2 y
-    mu_true_params = np.array([1.0, 2.0, 3.0])  # [mu0, mu1, mu2]
-    # compute mu at vertices using local coordinates
-    mu_verts = mu_true_params[0] + mu_true_params[1]*P_ls[0,:] + mu_true_params[2]*P_ls[1,:]
-    print("mu_verts:", mu_verts)
-
-    # Now run the same inversion you used
-    S_mu = np.ones((3,3))
-    S_mu[:,1:] = P_ls.T   # rows correspond to vertices
-    T_mu = np.linalg.inv(S_mu)
-    mu_params_recov = T_mu @ mu_verts
-    print("recovered mu_params:", mu_params_recov, " expected:", mu_true_params)
-
-    # local dv and transform to global
-    dv_local = np.array([0., mu_params_recov[1], mu_params_recov[2]])  # local vector [v_xlocal, v_ylocal, v_zlocal]
-    # Note ordering: earlier we used dv = [mu1, mu2, 0], placed as [v_x, v_y, v_z]
-    dv_local = np.array([mu_params_recov[1], mu_params_recov[2], 0.])
-    dv_global = A_ls_g @ dv_local
-    print("dv_local:", dv_local, " dv_global:", dv_global, " norm global:", np.linalg.norm(dv_global))
 
 
 def read_block(vtk_file: str) -> Block:
     ##读取vtk数据
     with open(vtk_file, mode="r") as f:
         data = f.readlines()
-
-    mark_line = []
-    var_list = ["X","Y","Z"]
 
     cell_start = None
     point_start = None
@@ -303,23 +311,52 @@ def read_block(vtk_file: str) -> Block:
     for i in range(cell_num):
         poly_idx = polygons[i, 1:]
         v1 = points[int(poly_idx[0])]; v2 = points[int(poly_idx[1])]; v3 = points[int(poly_idx[2])]
-        n1 = cell_data_dict[normal_keys[0]][i]; n2 = cell_data_dict[normal_keys[1]][i]; n3 = cell_data_dict[normal_keys[2]][i]
         data_dict = {}
         point_dict = {}
         for key in cell_data_dict:
-            # 跳过法向量键，只处理其他格心数据
-            if key not in normal_keys:
-                # 按索引i取出当前面元的该字段值，存入字典
-                data_dict[key] = cell_data_dict[key][i]
+            # 按索引i取出当前面元的该字段值，存入字典
+            data_dict[key] = cell_data_dict[key][i]
         for key in point_data_dict:
             da1 = point_data_dict[key][int(poly_idx[0])]
             da2 = point_data_dict[key][int(poly_idx[1])]
             da3 = point_data_dict[key][int(poly_idx[2])]
             # data_dict[key] = (da1+da2+da3)/3
             point_dict[key] = [da1, da2, da3]
-        e = Element(v1, v2, v3, n1, n2, n3, data_dict, point_dict)
+        e = Element(v1, v2, v3, data_dict, point_dict)
         aircraft.add_element(e)
 
+    return aircraft
+
+def read_wake(wake_vtk_file: str, aircraft_origin: Block) -> Block:
+    aircraft = aircraft_origin.copy()
+    wake_block = read_block(wake_vtk_file)
+    count = 0
+    for ew in wake_block.elements:
+        v_wake1, v_wake2, v_wake3 = ew.vertices
+        wake_mu = ew.get_point_data("mu")
+        for i in range(len(aircraft.elements)):
+            e = aircraft.elements[i]   # 取出内部真实对象
+            v1, v2, v3 = e.vertices
+
+            # 每个面元只复制一次 mu
+            new_mu = e.get_point_data("mu").copy()
+            updated = False
+
+            # 三个顶点逐点判断更新
+            for j in range(3):
+                ev = [v1, v2, v3][j]
+                wv = [v_wake1, v_wake2, v_wake3][j]
+                if np.linalg.norm(ev - wv) < 1e-6:
+                    new_mu[j] = wake_mu[j]
+                    updated = True
+            e.add_point_data
+            # 直接修改内部真实元素
+            if updated:
+                aircraft.elements[i].add_point_data("mu2", new_mu)
+                count += 1
+                      
+    print(count)
+    
     return aircraft
     
 def cal_cp(aircraft: Block) -> float:
@@ -332,35 +369,11 @@ def cal_cp(aircraft: Block) -> float:
         else:
             Cp = e.get_cell_data("C_p_2nd")
             Si = e.area
-            nz = e.normal_z
+            nz = e.get_cell_data("normals_z")
             dL = -Cp * Si * nz / Sref
             Lift += dL
 
     return Lift
-
-def cal_V(aircraft: Block, observe_points: NDArray) -> NDArray:
-    V = []
-    for ob_point in observe_points:
-        xp = ob_point[0]; yp = ob_point[1]; zp = ob_point[2]
-        Vi = np.zeros([3])
-        for e in aircraft.elements:
-            cx = e.get_cell_data("centroid_x"); cy = e.get_cell_data("centroid_y"); cz = e.get_cell_data("centroid_z")
-            n = np.array([e.normal_x, e.normal_y, e.normal_z])
-            r = np.array([xp - cx, yp - cy, zp - cz])
-            if r[1]**2 + r[2]**2 <= 3*r[0]**2:
-                mu = e.get_cell_data("mu")*1000
-                # mu = e.normal_x * (2 + e.get_cell_data("C_p_2nd"))
-                # mu = e.area * e.get_cell_data("mu")
-                mo = np.sqrt(r[0]**2 + r[1]**2 + r[2]**2) + 1e-8
-                er = r/mo
-                K = n[0]*er[0] + n[1]*er[1] + n[2]*er[2]
-                Dv = mu/(4*np.pi*(mo**3))*(3*K*er - n)
-                Vi += Dv
-        V.append(Vi)
-
-    V = np.array(V)
-
-    return V
 
 def gene_observe(aircraft_length: float, Mach: float, Rovel: float = 3, n_sample: int = 200) -> NDArray:
     y = np.ones([n_sample]) * 0.0
@@ -417,17 +430,53 @@ def read_csv():
 
     # plt.plot(x, dVx)
 
+def check_mu_difference(aircraft_before: Block, aircraft_after: Block) -> None:
+    """
+    检查两个Block对象中所有面板的mu是否一致
+    输出：不同的面板数量 + 具体差异
+    """
+    if len(aircraft_before.elements) != len(aircraft_after.elements):
+        print("❌ 面板数量不一致！")
+        return
+
+    diff_count = 0
+    total_count = len(aircraft_before.elements)
+
+    print("\n" + "="*60)
+    print("🔍 开始校验 mu 更新前后差异")
+    print("="*60)
+
+    for idx, (e_before, e_after) in enumerate(zip(aircraft_before.elements, aircraft_after.elements)):
+        mu_before = e_before.get_point_data("mu")
+        mu_after = e_after.get_point_data("mu")
+
+        # 数值精度判断
+        if not np.allclose(mu_before, mu_after, atol=1e-10):
+            diff_count += 1
+            # 可选：打印前5个不同的面板详情
+            if diff_count <= 5:
+                print(f"面板 {idx}:")
+                print(f"  旧 mu = {mu_before}")
+                print(f"  新 mu = {mu_after}")
+                print("-"*50)
+
+    print(f"\n✅ 校验完成：")
+    print(f"   总面板数：{total_count}")
+    print(f"   mu 不同的面板数：{diff_count}")
+    print(f"   mu 相同的面板数：{total_count - diff_count}")
+
+    if diff_count == 0:
+        print("\n❌ 严重：mu 完全没有被修改！")
+    else:
+        print(f"\n✅ 成功：{diff_count} 个面板的 mu 已更新！")
+
 def main() -> None:
-    aircraft = read_block("7105_notail.vtk")
-    aircraft.write_dat()
-    # read_csv()
-    print(cal_cp(aircraft))
+    aircraft = read_block("JWB_CQ.vtk")
+    aircraft.read_wake("JWB_CQ_wake.vtk")
+    print(len(aircraft.tail_elements))
     aircraft.cal_v_vert()
-    test_pipeline()
-    # observe_points = gene_observe(72.0, 2.0)
-    # V = cal_V(aircraft, observe_points)
-    # plt.plot(observe_points[:, 0], V[:, 0])
-    # print(V)
+    aircraft.write_dat()
+
 
 if __name__ == "__main__":
     main()
